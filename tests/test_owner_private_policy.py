@@ -416,3 +416,51 @@ async def test_registered_native_page_management_preserves_adapter_boundary(tmp_
             assert await engine.get_memory(ids[0]) is None
     finally:
         await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("adapter_id", [None, "adapter-synthetic"])
+async def test_registered_native_import_retains_inferred_adapter(tmp_path, enabled, adapter_id):
+    from tests.test_agentic_engine_retrieval import _make_engine
+    from tests.test_page_api import FakePlugin, _qp
+    from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
+    from astrbot_plugin_livingmemory.core.page_api import PluginPageApi, PAGE_API_PREFIX
+    engine = await _make_engine(tmp_path)
+    config = ConfigManager({"filtering_settings": {
+        **CONFIG["filtering_settings"], "owner_private_read_union": enabled,
+    }})
+    engine.read_policy_config = config
+    try:
+        plugin = FakePlugin(memory_engine=engine)
+        plugin.config_manager = config
+        api = PluginPageApi(plugin)
+        api.register_routes()
+        routes = {route: handler for route, handler, _, _ in plugin._api_routes}
+        payload = {"format": "json", "dry_run": False, "content": json.dumps([{
+            "content": "synthetic imported provenance",
+            "session_id": "adapter-synthetic:FriendMessage:owner-synthetic",
+            "persona_id": "persona-synthetic",
+        }])}
+        query = {"adapter_id": adapter_id} if adapter_id else {}
+        with _qp(args=query, get_json=payload):
+            result = await routes[f"{PAGE_API_PREFIX}/memories/import"]()
+        assert result["status"] == "ok"
+        assert result["data"]["imported_count"] == 1
+        memory_id = result["data"]["imported_ids"][0]
+        cursor = await engine.db_connection.execute(
+            "SELECT metadata FROM documents WHERE id = ?", (memory_id,)
+        )
+        metadata = json.loads((await cursor.fetchone())[0])
+        assert metadata["adapter_id"] == "adapter-synthetic"
+        engine.faiss_db.document_storage = SqlStorage(engine.db_path)
+        # The persisted record must remain readable by its real event, including
+        # when owner-private authorization requires exact adapter provenance.
+        with adapter_access(config, Event(), persona_id="persona-synthetic"):
+            assert await engine.get_memory(memory_id) is not None
+        if enabled:
+            assert await engine.get_memory(memory_id) is None
+            assert await engine.get_memory_source(memory_id) == []
+            assert await engine.search_memories("synthetic imported provenance") == []
+    finally:
+        await engine.close()

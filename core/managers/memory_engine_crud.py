@@ -105,7 +105,10 @@ class MemoryEngineCrudMixin:
         access = current_adapter_access.get()
         full_metadata["adapter_id"] = full_metadata.get("adapter_id") or (
             access.adapter_id
+            # Unfiltered native management grants authority, not provenance.
+            # Retain the original structured-source inference for its imports.
             if access is not None
+            and not (access.native_management and not access.adapter_id)
             else infer_adapter_id(
                 full_metadata,
                 source_messages or [],

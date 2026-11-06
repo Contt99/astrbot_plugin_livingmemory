@@ -163,7 +163,7 @@ class AgenticMemorySearchTool(FunctionTool[AstrAgentContext]):
             recall_persona_id,
             access_error,
         ) = await resolve_tool_access(self.config_manager, self.context, context)
-        with adapter_access(self.config_manager, event):
+        with adapter_access(self.config_manager, event, persona_id=recall_persona_id):
             if access_error is not None:
                 return bounded_status(
                     {

@@ -104,6 +104,7 @@ class InitializerFinalizeMixin:
                 }
             )
             memory_engine_config = {
+                "owner_private_read_union": self.config_manager.get("filtering_settings.owner_private_read_union", False),
                 "graph_document_path": str(graph_doc_path)
                 if graph_memory_enabled
                 else None,
@@ -275,6 +276,7 @@ class InitializerFinalizeMixin:
                 graph_vector_db=self.graph_db,
                 llm_provider=self.llm_provider,
                 config=memory_engine_config,
+                read_policy_config=self.config_manager,
                 rerank_provider_resolver=resolve_rerank_provider,
             )
             await self.memory_engine.initialize()

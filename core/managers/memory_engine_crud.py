@@ -12,6 +12,7 @@ from typing import Any
 import aiosqlite
 
 from astrbot.api import logger
+from ..memory_scope import read_denied, read_filters, current_read_policy
 
 from ...storage.atom_store import AtomStore
 from ..memory_transfer import memory_import_key
@@ -257,6 +258,8 @@ class MemoryEngineCrudMixin:
 
     async def get_memory_source(self, memory_id: int) -> list[dict[str, Any]]:
         """Return structured source messages for one memory."""
+        if read_denied(self.read_policy_config):
+            return []
         if (
             current_adapter_access.get() is not None
             and await self.get_memory(memory_id) is None
@@ -399,12 +402,24 @@ class MemoryEngineCrudMixin:
         Returns:
             List[HybridResult]: 检索结果列表
         """
-        if not query or not query.strip():
+        if read_denied(self.read_policy_config) or not query or not query.strip():
             return []
+
+        session_id, persona_id = read_filters(session_id, persona_id)
 
         cache_key = self._search_cache_key(query, k, session_id, persona_id)
         cached_results = self._get_cached_search_results(cache_key)
         if cached_results is not None:
+            if current_read_policy() is not None and cached_results:
+                # Re-check live document ownership; stale cached metadata is not
+                # an authorization source (including changes outside this engine).
+                live = await retrieve_documents(
+                    self.faiss_db, metadata_filters={},
+                    ids=[r.doc_id for r in cached_results], limit=len(cached_results),
+                )
+                visible_ids = {int(document["id"]) for document in live}
+                cached_results = [r for r in cached_results if r.doc_id in visible_ids]
+            cached_results = [r for r in cached_results if adapter_visible(r.metadata)]
             cached_results = await self._apply_atom_policy(cached_results)
             await self._update_access_times_internal(
                 [result.doc_id for result in cached_results],
@@ -513,6 +528,7 @@ class MemoryEngineCrudMixin:
                 ],
             )
 
+        results = [r for r in results if adapter_visible(r.metadata)]
         self._set_cached_search_results(cache_key, results)
         return results
 
@@ -569,6 +585,8 @@ class MemoryEngineCrudMixin:
         Returns:
             Optional[Dict]: 记忆数据,包含text和metadata
         """
+        if read_denied(self.read_policy_config):
+            return None
         # 从faiss_db的document_storage获取文档
         try:
             # 使用 get_documents (复数) 并传入 ids 参数

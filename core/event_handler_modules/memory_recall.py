@@ -15,6 +15,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
 from ..memory_scope import (
+    bind_read_persona,
     is_event_memory_allowed,
     is_suspicious_session_id,
     resolve_memory_scope,
@@ -25,6 +26,12 @@ from ..utils import (
     get_persona_id,
 )
 from .memory_reflection import cancel_session_storage_task
+from ..temporal_coverage import (
+    FOOTER as TEMPORAL_FOOTER,
+    HEADER as TEMPORAL_HEADER,
+    format_coverage,
+    is_temporal_question,
+)
 
 if TYPE_CHECKING:
     from ..base.config_manager import ConfigManager
@@ -134,6 +141,7 @@ class MemoryRecall:
                 # 新规则的临时片段只携带本插件专用标记，去重独立于旧清理开关，
                 # 重复执行钩子也不会叠加。
                 self._remove_agent_recall_policy_from_context(req)
+                self._remove_temporal_coverage_from_context(req)
 
                 # 先提取用户消息（消息存储和召回都需要）
                 actual_query = await self.message_utils.get_event_message_str(event)
@@ -196,6 +204,7 @@ class MemoryRecall:
                 # 注意：on_llm_request 钩子在 _ensure_persona_and_skills 之前触发，
                 # 因此不能直接依赖 req.system_prompt 已注入人格，需自行走完整优先级。
                 persona_id = await get_persona_id(self.context, event)
+                bind_read_persona(persona_id)
 
                 recall_session_id = resolve_memory_scope(self.config_manager, event)
                 recall_persona_id = persona_id if use_persona_filtering else None
@@ -314,10 +323,41 @@ class MemoryRecall:
                 else:
                     logger.info(f"[{session_id}] 未找到相关记忆")
 
+                await self._inject_temporal_coverage(
+                    req, actual_query, recall_session_id, recall_persona_id
+                )
+
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"处理 on_llm_request 钩子时发生错误: {e}", exc_info=True)
+
+    @staticmethod
+    def _remove_temporal_coverage_from_context(req) -> None:
+        parts = getattr(req, "extra_user_content_parts", None)
+        if parts:
+            req.extra_user_content_parts = [
+                part for part in parts
+                if not (getattr(part, "_no_save", False)
+                        and str(getattr(part, "text", "")).startswith(TEMPORAL_HEADER)
+                        and str(getattr(part, "text", "")).endswith(TEMPORAL_FOOTER))
+            ]
+
+    async def _inject_temporal_coverage(self, req, query, session_id, persona_id) -> None:
+        if not is_temporal_question(query):
+            return
+        try:
+            result = await asyncio.wait_for(
+                self.memory_engine.get_temporal_coverage(
+                    session_id=session_id, persona_id=persona_id
+                ), timeout=0.5
+            )
+            text = format_coverage(result)
+            if text:
+                req.extra_user_content_parts.append(TextPart(text=text).mark_as_temp())
+                logger.info("[LivingMemory] 已注入限定会话的时间覆盖证据")
+        except Exception as error:
+            logger.warning("[LivingMemory] 时间覆盖证据暂不可用 (%s)", type(error).__name__)
 
     def _remove_agent_recall_policy_from_context(self, req: ProviderRequest) -> int:
         """移除本插件上一轮注入的自主回忆规则临时片段（重复钩子去重）。

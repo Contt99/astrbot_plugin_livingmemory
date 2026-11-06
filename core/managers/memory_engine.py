@@ -102,6 +102,7 @@ class MemoryEngine(
         llm_provider=None,
         config: dict[str, Any] | None = None,
         rerank_provider_resolver: Callable[[], Any] | None = None,
+        read_policy_config: Any | None = None,
     ):
         """
         初始化记忆引擎
@@ -121,12 +122,17 @@ class MemoryEngine(
                 - stopwords_path: 停用词文件路径(可选)
             rerank_provider_resolver: 返回RerankProvider实例的可调用对象(可选)。
                 动态解析以适配AstrBot的Provider实例重建,传None时跳过重排序。
+            read_policy_config: 宿主配置管理器；保持运行时读取权限与配置同步。
         """
         self.db_path = db_path
         self.faiss_db = faiss_db
         self.graph_vector_db = graph_vector_db
         self.llm_provider = llm_provider
         self.config = config or {}
+        # Keep the host manager live so dashboard toggles also guard no-event reads.
+        self.read_policy_config = (
+            read_policy_config if read_policy_config is not None else self.config
+        )
         self.rerank_provider_resolver = rerank_provider_resolver
         self.graph_enabled = bool(self.config.get("graph_memory_enabled", False))
         self.atom_enabled = bool(

@@ -1,6 +1,7 @@
 """Beta 共用证据读取：每次校验权限与生命周期，分页留给最终输出层。"""
 
 import asyncio
+from ..memory_scope import adapter_visible, read_filters
 from typing import Any
 
 
@@ -22,8 +23,12 @@ async def read_memory_evidence_core(
     if not doc:
         return {"memory_id": memory_id, "status": "not_found"}
     metadata = doc["metadata"]
+    recall_session_id, recall_persona_id = read_filters(
+        recall_session_id, recall_persona_id
+    )
     if (
-        (
+        not adapter_visible(metadata)
+        or (
             recall_session_id is not None
             and metadata.get("session_id") != recall_session_id
         )

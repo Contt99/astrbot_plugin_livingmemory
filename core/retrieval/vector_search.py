@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from types import SimpleNamespace
 
 from ..faiss_async_persist import get_async_persister
-from ..memory_scope import adapter_sql, adapter_visible, current_adapter_access
+from ..memory_scope import adapter_sql, adapter_visible, current_adapter_access, current_read_policy
 
 query_embeddings = ContextVar("livingmemory_query_embeddings", default=None)
 
@@ -67,6 +67,9 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
     storage = getattr(db, "embedding_storage", None)
     total = getattr(getattr(storage, "index", None), "ntotal", None)
     native = isinstance(total, int)
+    if current_read_policy() is not None and not native:
+        # Old adapters cannot constrain kNN candidates before global top-k.
+        return []
     cap = min(total, 8192) if native else 8192
     if native and not total:
         return []
@@ -77,7 +80,7 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
         import numpy as np
 
         access = current_adapter_access.get()
-        if access is not None and access.adapter_ids is not None:
+        if access is not None and (access.adapter_ids is not None or access.read_policy is not None):
             import faiss
 
             candidates = await retrieve_documents(

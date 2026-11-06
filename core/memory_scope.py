@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 GLOBAL_MEMORY_SCOPE = "livingmemory:global"
@@ -17,6 +17,8 @@ class AdapterAccess:
 
     adapter_id: str
     adapter_ids: tuple[str, ...] | None
+    read_policy: Any = None
+    write: bool = False
 
 
 current_adapter_access: ContextVar[AdapterAccess | None] = ContextVar(
@@ -25,7 +27,7 @@ current_adapter_access: ContextVar[AdapterAccess | None] = ContextVar(
 
 
 @contextmanager
-def adapter_access(config: Any, event: Any, *, write: bool = False):
+def adapter_access(config: Any, event: Any, *, write: bool = False, persona_id=None):
     """Apply adapter policy to this task and reset it when the request finishes."""
     adapter_id = (
         event if isinstance(event, str) else _event_value(event, "get_platform_id")
@@ -39,16 +41,23 @@ def adapter_access(config: Any, event: Any, *, write: bool = False):
     elif shared is not None:
         members = parse_value_list(shared)
         allowed = tuple(sorted(members)) if adapter_id in members else (adapter_id,)
-    token = current_adapter_access.set(AdapterAccess(adapter_id, allowed))
+    policy = None
+    if owner_read_enabled(config) and not write:
+        from .owner_read_policy import derive_read_policy
+
+        policy = derive_read_policy(config, event, persona_id)
+    token = current_adapter_access.set(AdapterAccess(adapter_id, allowed, policy, write))
     try:
         yield
     finally:
         current_adapter_access.reset(token)
 
 
-def adapter_sql(metadata: str) -> tuple[str, list[str]]:
+def adapter_sql(metadata: str) -> tuple[str, list[Any]]:
     """Build a parameterized ownership predicate for an internal SQL expression."""
     access = current_adapter_access.get()
+    if access is not None and access.read_policy is not None:
+        return access.read_policy.sql(metadata)
     if access is None or access.adapter_ids is None:
         return "1", []
     values = list(access.adapter_ids)
@@ -61,6 +70,8 @@ def adapter_sql(metadata: str) -> tuple[str, list[str]]:
 def adapter_visible(metadata: dict[str, Any]) -> bool:
     """Apply the current adapter boundary to a loaded memory."""
     access = current_adapter_access.get()
+    if access is not None and access.read_policy is not None:
+        return access.read_policy.visible(metadata)
     return (
         access is None
         or access.adapter_ids is None
@@ -68,10 +79,47 @@ def adapter_visible(metadata: dict[str, Any]) -> bool:
     )
 
 
-def adapter_cache_key() -> tuple[str, ...] | None:
+def adapter_cache_key() -> tuple[Any, ...] | None:
     """Return the adapter dimension for request-independent retrieval caches."""
     access = current_adapter_access.get()
+    if access is not None and access.read_policy is not None:
+        return ("owner_private_read", access.read_policy)
     return access.adapter_ids if access is not None else None
+
+
+def owner_read_enabled(config):
+    return bool(
+        _config_get(config, "filtering_settings.owner_private_read_union", False)
+        or _config_get(config, "owner_private_read_union", False)
+    )
+
+
+def current_read_policy():
+    access = current_adapter_access.get()
+    return access.read_policy if access else None
+
+
+def bind_read_persona(persona_id):
+    """Called only with the persona resolved from the actual event by host code."""
+    access = current_adapter_access.get()
+    if access is not None and access.read_policy is not None:
+        current_adapter_access.set(
+            replace(access, read_policy=access.read_policy.with_persona(persona_id))
+        )
+
+
+def read_denied(config):
+    access = current_adapter_access.get()
+    policy = current_read_policy()
+    if policy is not None:
+        return not policy.ready
+    return owner_read_enabled(config) and not (access and access.write)
+
+
+def read_filters(session_id, persona_id):
+    """SQL policy replaces caller filters; model arguments cannot widen access."""
+    policy = current_read_policy()
+    return (None, policy.persona_id) if policy is not None else (session_id, persona_id)
 
 
 def infer_adapter_id(

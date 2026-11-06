@@ -5,6 +5,7 @@ from datetime import datetime, time as dt_time
 from typing import Any
 
 from ..memory_scope import (
+    owner_read_enabled,
     is_event_memory_allowed,
     resolve_event_identity,
     resolve_memory_scope,
@@ -58,7 +59,8 @@ async def resolve_tool_access(
     filtering_config = config_manager.filtering_settings
     use_persona_filtering = filtering_config.get("use_persona_filtering", True)
     persona_id = (
-        await get_persona_id(plugin_context, event) if use_persona_filtering else None
+        await get_persona_id(plugin_context, event)
+        if use_persona_filtering or owner_read_enabled(config_manager) else None
     )
     recall_session_id = resolve_memory_scope(config_manager, event)
     return event, recall_session_id, persona_id, None

@@ -456,6 +456,18 @@
         "description": "记忆隔离设置",
         "type": "object",
         "items": {
+            "owner_private_read_union": {
+                "description": "主人私聊联合读取群记忆",
+                "hint": "默认关闭。开启后仅主人私聊可读同适配器、同人格的全部群记忆及自己的私聊。群聊只读本群，其他私聊只读自己；缺少真实事件、适配器或人格时拒绝读取。不会扩大写入范围。",
+                "type": "bool",
+                "default": false
+            },
+            "owner_private_ids": {
+                "description": "主人原始用户 ID",
+                "hint": "多个 ID 用逗号或换行分隔。只匹配真实事件的原始发送者 ID，不使用别名；请勿填写群号。",
+                "type": "string",
+                "default": ""
+            },
             "use_persona_filtering": {
                 "description": "按人格隔离记忆",
                 "hint": "开启后只召回与当前人格相关的记忆，不同人格的记忆互不干扰。",

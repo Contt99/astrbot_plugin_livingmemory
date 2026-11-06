@@ -1,6 +1,6 @@
 """供 Agent 主动调用的长期记忆回忆工具。"""
 
-from ..memory_scope import adapter_access
+from ..memory_scope import adapter_access, bind_read_persona, owner_read_enabled
 import asyncio
 import json
 from dataclasses import field
@@ -117,10 +117,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
                 persona_id = (
                     await get_persona_id(self.context, event)
-                    if use_persona_filtering
+                    if use_persona_filtering or owner_read_enabled(self.config_manager)
                     else None
                 )
 
+                bind_read_persona(persona_id)
                 recall_scope = resolve_memory_scope(self.config_manager, event)
                 recall_session_id = recall_scope
                 # session_filtered 只表示本次查询是否真的按会话隔离：global / user

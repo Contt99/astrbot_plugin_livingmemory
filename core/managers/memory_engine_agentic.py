@@ -3,6 +3,7 @@
 import asyncio
 
 from astrbot.api import logger
+from ..memory_scope import read_denied, read_filters, adapter_visible
 
 from ..retrieval.hybrid_retriever import HybridResult
 from ..retrieval.recall_diagnostics import all_routes_failed, merge_route
@@ -39,6 +40,9 @@ class MemoryEngineAgenticMixin(MemoryEngineEvidenceMixin, MemoryEngineParticipan
         exclude_ids=None,
         cursor="",
     ) -> AgenticRecallOutcome:
+        if read_denied(self.read_policy_config):
+            return AgenticRecallOutcome([], "no_candidates")
+        session_id, persona_id = read_filters(session_id, persona_id)
         query = (query or "").strip()
         if target not in ("conversation", "current_speaker"):
             return AgenticRecallOutcome(
@@ -138,7 +142,7 @@ class MemoryEngineAgenticMixin(MemoryEngineEvidenceMixin, MemoryEngineParticipan
                 results = [
                     result
                     for result in results
-                    if (
+                    if adapter_visible(result.metadata) and (
                         session_id is None
                         or result.metadata.get("session_id") == session_id
                     )

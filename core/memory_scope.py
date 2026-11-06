@@ -19,6 +19,7 @@ class AdapterAccess:
     adapter_ids: tuple[str, ...] | None
     read_policy: Any = None
     write: bool = False
+    native_management: bool = False
 
 
 current_adapter_access: ContextVar[AdapterAccess | None] = ContextVar(
@@ -47,6 +48,36 @@ def adapter_access(config: Any, event: Any, *, write: bool = False, persona_id=N
 
         policy = derive_read_policy(config, event, persona_id)
     token = current_adapter_access.set(AdapterAccess(adapter_id, allowed, policy, write))
+    try:
+        yield
+    finally:
+        current_adapter_access.reset(token)
+
+
+@contextmanager
+def mutation_access(config: Any, event: Any, *, persona_id=None):
+    """Bind host event/persona for mutations, without the owner's read union."""
+    with adapter_access(config, event, persona_id=persona_id):
+        access = current_adapter_access.get()
+        if access.read_policy is not None:
+            scope = resolve_memory_scope(config, event) or _event_value(event, "unified_msg_origin")
+            policy = replace(access.read_policy, private_scopes=(scope,), group_prefix="")
+            current_adapter_access.set(replace(access, read_policy=policy))
+        yield
+
+
+@contextmanager
+def _native_page_management_access(adapter_id: str | None):
+    """Only the host-authenticated native PageApi wrapper may enter this context.
+
+    This authority is never inferred from an event, a tool argument or an
+    adapter string passed to adapter_access(). Management is independent of
+    the owner read union; an optional adapter restricts all reads and writes.
+    """
+    token = current_adapter_access.set(AdapterAccess(
+        adapter_id or "", (adapter_id,) if adapter_id else None,
+        native_management=True,
+    ))
     try:
         yield
     finally:
@@ -113,7 +144,9 @@ def read_denied(config):
     policy = current_read_policy()
     if policy is not None:
         return not policy.ready
-    return owner_read_enabled(config) and not (access and access.write)
+    return owner_read_enabled(config) and not (
+        access and (access.write or access.native_management)
+    )
 
 
 def read_filters(session_id, persona_id):

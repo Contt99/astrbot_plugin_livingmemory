@@ -14,7 +14,7 @@ from functools import wraps
 
 from quart import request
 
-from .memory_scope import adapter_access
+from .memory_scope import _native_page_management_access
 
 from .page_api_modules import (
     BackupHandler,
@@ -70,9 +70,10 @@ class PluginPageApi:
             @wraps(handler)
             async def scoped_handler(*args, **kwargs):
                 adapter_id = request.args.get("adapter_id")
-                if not adapter_id:
-                    return await handler(*args, **kwargs)
-                with adapter_access(self.plugin.config_manager, adapter_id):
+                # register_web_api uses the host's AUTHENTICATED native plugin
+                # boundary. Only this registered wrapper grants management
+                # authority; generic engine/tool calls gain no such authority.
+                with _native_page_management_access(adapter_id):
                     return await handler(*args, **kwargs)
 
             self.plugin.context.register_web_api(

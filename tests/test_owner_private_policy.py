@@ -139,6 +139,26 @@ class SqlStorage:
     def __init__(self, path):
         self.path = path
 
+    async def get_documents(self, metadata_filters, ids=None, limit=50, offset=0):
+        # The native host uses this API when no SQL ownership predicate is
+        # needed (authenticated unfiltered management / default-OFF behavior).
+        clauses, params = ["1"], []
+        if ids is not None:
+            clauses.append(f"id IN ({','.join('?' for _ in ids)})")
+            params.extend(ids)
+        for key, value in metadata_filters.items():
+            clauses.append("json_extract(metadata, ?) = ?")
+            params.extend([f"$.{key}", value])
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        try:
+            data = connection.execute(
+                "SELECT id, text, metadata FROM documents WHERE " + " AND ".join(clauses)
+                + " ORDER BY id LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
+            return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in data]
+        finally:
+            connection.close()
+
     @asynccontextmanager
     async def get_session(self):
         connection = sqlite3.connect(self.path)
@@ -297,3 +317,102 @@ def test_binding_persona_and_write_context_do_not_union_storage():
     with adapter_access(CONFIG, Event(), write=True):
         assert adapter_cache_key() == ("adapter-synthetic",)
         assert resolve_memory_scope(CONFIG, Event()) == Event().unified_msg_origin
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event,own_index", [(Event(), 0), (Event(group="group-a"), 2),
+    (Event(sender="other-synthetic"), 4)])
+@pytest.mark.parametrize("session_filtering", [True, False])
+async def test_admin_forget_archives_only_original_scope_with_real_engine(tmp_path, event, own_index, session_filtering):
+    from tests.test_agentic_engine_retrieval import _make_engine
+    from tests.test_agentic_tools import _plugin_context, _context, _patched_host_sp
+    from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
+    from astrbot_plugin_livingmemory.core.tools.memory_forget_tool import MemoryForgetTool
+    engine = await _make_engine(tmp_path)
+    engine.config["owner_private_read_union"] = True
+    config = ConfigManager({"filtering_settings": {**CONFIG["filtering_settings"],
+                            "use_persona_filtering": False, "use_session_filtering": session_filtering},
+                            "agent_tools": {"forget_tool_cooldown_seconds": 0}})
+    event.is_admin = lambda: True
+    ids = []
+    try:
+        for metadata in rows():
+            ids.append(await engine.add_memory("synthetic forget evidence",
+                session_id=metadata.get("session_id"), persona_id=metadata.get("persona_id"),
+                metadata=metadata))
+        engine.faiss_db.document_storage = SqlStorage(engine.db_path)
+        tool = MemoryForgetTool(config_manager=config, memory_engine=engine,
+                                context=_plugin_context("persona-synthetic"))
+        with _patched_host_sp():
+            unknown_persona = MemoryForgetTool(config_manager=config, memory_engine=engine,
+                                               context=_plugin_context(None))
+            denied = json.loads(await unknown_persona.call(_context(event), memory_ids=[ids[own_index]]))
+            assert denied["forgotten"] is False
+            # Even a mixed batch must leave the valid original-scope row active.
+            for forbidden in range(len(ids)):
+                if forbidden == own_index:
+                    continue
+                output = json.loads(await tool.call(_context(event),
+                    memory_ids=[ids[own_index], ids[forbidden]]))
+                assert output["forgotten"] is False
+            output = json.loads(await tool.call(_context(event), memory_ids=[ids[own_index]]))
+        assert output["forgotten"] is True
+        assert output["archived_count"] == 1
+        cursor = await engine.db_connection.execute("SELECT id, metadata FROM documents")
+        archived = {row["id"] for row in await cursor.fetchall()
+                    if json.loads(row["metadata"]).get("status") == "archived"}
+        assert archived == {ids[own_index]}
+        # The tool's mutation context must not survive its request.
+        assert await engine.get_memory(ids[own_index]) is None
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_id", [None, "adapter-synthetic"])
+async def test_registered_native_page_management_preserves_adapter_boundary(tmp_path, adapter_id):
+    from tests.test_agentic_engine_retrieval import _make_engine
+    from tests.test_page_api import FakePlugin, _qp
+    from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
+    from astrbot_plugin_livingmemory.core.page_api import PluginPageApi, PAGE_API_PREFIX
+    engine = await _make_engine(tmp_path)
+    engine.config["owner_private_read_union"] = True
+    try:
+        ids = []
+        for metadata in (rows()[0], rows()[7]):
+            ids.append(await engine.add_memory("synthetic page evidence",
+                session_id=metadata["session_id"], persona_id=metadata["persona_id"],
+                metadata=metadata, source_messages=[{"role": "user", "content": "synthetic source"}]))
+        engine.faiss_db.document_storage = SqlStorage(engine.db_path)
+        plugin = FakePlugin(memory_engine=engine)
+        plugin.config_manager = ConfigManager(CONFIG)
+        api = PluginPageApi(plugin)
+        api.register_routes()
+        routes = {route: handler for route, handler, _, _ in plugin._api_routes}
+        query = {"adapter_id": adapter_id} if adapter_id else {}
+        with _qp(args=query):
+            page = await routes[f"{PAGE_API_PREFIX}/memories"]()
+        assert page["status"] == "ok"
+        assert {item["id"] for item in page["data"]["items"]} == ({ids[0]} if adapter_id else set(ids))
+        for index, memory_id in enumerate(ids):
+            allowed = not adapter_id or index == 0
+            with _qp(args={**query, "memory_id": str(memory_id)}):
+                detail = await routes[f"{PAGE_API_PREFIX}/memories/detail"]()
+            assert (detail["status"] == "ok") == allowed
+            if allowed:
+                assert detail["data"]["source_messages"][0]["content"] == "synthetic source"
+            with _qp(args=query, get_json={"memory_id": memory_id, "field": "status", "value": "archived"}):
+                update = await routes[f"{PAGE_API_PREFIX}/memories/update"]()
+            assert (update["status"] == "ok") == allowed
+        cursor = await engine.db_connection.execute("SELECT id, metadata FROM documents")
+        archived = {row["id"] for row in await cursor.fetchall()
+                    if json.loads(row["metadata"]).get("status") == "archived"}
+        assert archived == ({ids[0]} if adapter_id else set(ids))
+        # A generic eventless caller cannot inherit authenticated page authority.
+        assert await engine.get_memory(ids[0]) is None
+        assert await engine.get_memory_source(ids[0]) == []
+        with adapter_access(CONFIG, "adapter-synthetic"):
+            assert (await engine.list_memories_page())["total"] == 0
+            assert await engine.get_memory(ids[0]) is None
+    finally:
+        await engine.close()

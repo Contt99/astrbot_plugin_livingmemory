@@ -4,7 +4,7 @@
 仍保留在 documents 表中，管理员可从 WebUI 记忆页把状态改回 active 恢复。
 """
 
-from ..memory_scope import adapter_access
+from ..memory_scope import mutation_access
 import asyncio
 import json
 import math
@@ -120,7 +120,7 @@ class MemoryForgetTool(FunctionTool[AstrAgentContext]):
                 recall_persona_id,
                 access_error,
             ) = await resolve_tool_access(self.config_manager, self.context, context)
-            with adapter_access(self.config_manager, event):
+            with mutation_access(self.config_manager, event, persona_id=recall_persona_id):
                 if access_error is not None:
                     return _json_result({"forgotten": False, **access_error})
 
@@ -182,7 +182,8 @@ class MemoryForgetTool(FunctionTool[AstrAgentContext]):
                             }
                         )
 
-                # 作用域校验（与检索可见性一致）：任一 id 不合法则整批拒绝，绝不部分归档
+                # 仅原始写入作用域可归档；主人的跨群读取权限不授予跨群修改权限。
+                # 任一 id 不合法则整批拒绝，绝不部分归档。
                 invalid_ids: list[int] = []
                 for memory_id in unique_ids:
                     memory = await self.memory_engine.get_memory(memory_id)

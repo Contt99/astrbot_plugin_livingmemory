@@ -165,7 +165,18 @@ class MessageUtils:
                 )
                 logger.debug(f"跳过未知消息组件: {component_type}")
 
-        return " ".join(parts).strip()
+        joined = " ".join(parts).strip()
+
+        # 纯图片消息在被动捕获阶段拿不到 req，图片只能落成 [图片] 占位。
+        # 若上游插件（如 chat_plus）已把图片转文字的结果回填进 event.message_str，
+        # 这里优先采用它，避免图片内容在长期记忆里彻底丢失成一句 [图片]。
+        # 仅在整条消息除了图片占位之外没有其他文字时才替换，不影响图文混排。
+        if req is None and joined and not joined.replace("[图片]", "").strip():
+            fallback = (getattr(event, "message_str", "") or "").strip()
+            if fallback:
+                return fallback
+
+        return joined
 
     async def get_event_message_str(self, event: AstrMessageEvent) -> str:
         """Get normalized raw message text from event."""

@@ -384,7 +384,7 @@ class LivingMemoryPlugin(Star):
 
     # ==================== 事件钩子 ====================
 
-    @filter.custom_filter(PassiveGroupCaptureFilter, False)
+    @filter.custom_filter(PassiveGroupCaptureFilter, False, priority=-999)
     async def handle_all_group_messages(self, event: AstrMessageEvent):
         """[Passive Filter Hook] Capture group messages without waking AstrBot."""
         # PassiveGroupCaptureFilter schedules the capture task and always returns

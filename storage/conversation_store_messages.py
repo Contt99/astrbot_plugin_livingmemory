@@ -811,6 +811,39 @@ class ConversationStoreMessagesMixin:
             logger.error(f"更新消息metadata失败: {e}", exc_info=True)
             return False
 
+    async def update_message_content(self, message_id: int, content: str) -> bool:
+        """更新消息正文
+
+        用于图片描述回填：消息先按占位符入库，等上游图片转文字结果到达后
+        再把正文替换成带描述的内容。
+
+        Args:
+            message_id: 消息ID
+            content: 新的正文
+
+        Returns:
+            bool: 是否更新成功
+        """
+        if self.connection is None:
+            return False
+
+        try:
+            async with self._write_lock:
+                await self.connection.execute(
+                    """
+                    UPDATE messages
+                    SET content = ?
+                    WHERE id = ?
+                    """,
+                    (content, message_id),
+                )
+                await self.connection.commit()
+            logger.debug(f"[ConversationStore] 更新消息正文: id={message_id}")
+            return True
+        except Exception as e:
+            logger.error(f"更新消息正文失败: {e}", exc_info=True)
+            return False
+
     async def search_messages(
         self, session_id: str, keyword: str, limit: int = 20
     ) -> list[Message]:

@@ -167,14 +167,15 @@ class MessageUtils:
 
         joined = " ".join(parts).strip()
 
-        # 纯图片消息在被动捕获阶段拿不到 req，图片只能落成 [图片] 占位。
+        # 被动捕获阶段拿不到 req，图片只能落成 [图片] 占位。
         # 若上游插件（如 chat_plus）已把图片转文字的结果回填进 event.message_str，
         # 这里优先采用它，避免图片内容在长期记忆里彻底丢失成一句 [图片]。
-        # 仅在整条消息除了图片占位之外没有其他文字时才替换，不影响图文混排。
-        if req is None and joined and not joined.replace("[图片]", "").strip():
+        # 只要原文里出现过图片占位、且上游回填的是带描述的版本，就采用回填内容；
+        # 纯文字消息不会进入这个分支，不受影响。
+        if req is None and "[图片]" in joined:
             fallback = (getattr(event, "message_str", "") or "").strip()
-            if fallback:
-                return fallback
+            if fallback and "[图片内容" in fallback:
+                return fallback[:2000]
 
         return joined
 

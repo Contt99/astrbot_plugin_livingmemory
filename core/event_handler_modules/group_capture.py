@@ -39,6 +39,40 @@ class GroupCapture:
         self.conversation_manager = conversation_manager
         self.message_utils = message_utils
 
+    @staticmethod
+    def _has_image_placeholder(text: str) -> bool:
+        """内容里是否还有未被描述的图片占位符"""
+        return "[图片]" in (text or "")
+
+    async def _backfill_image_description(
+        self,
+        message_id: int,
+        event: AstrMessageEvent,
+        original: str,
+    ) -> None:
+        """图片转文字的结果由上游图片处理链路异步回填到 message_str。
+
+        被动捕获早于图片处理，含图片的消息此刻只能落成 ``[图片]`` 占位。这里在
+        后台等描述出现后把正文补写回去，避免历史窗口和长期记忆里只剩占位符。
+        等待期间不阻塞消息入库，也不影响同会话内的消息顺序。
+        """
+        store = getattr(self.conversation_manager, "store", None)
+        update = getattr(store, "update_message_content", None)
+        if update is None:
+            return
+        for _ in range(120):
+            await asyncio.sleep(0.5)
+            latest = (getattr(event, "message_str", "") or "").strip()
+            if not latest or "[图片内容" not in latest:
+                continue
+            if latest == original:
+                return
+            if await update(message_id, latest[:2000]):
+                logger.debug(
+                    f"[图片描述回填] message_id={message_id} 长度={len(latest)}"
+                )
+            return
+
     async def handle_all_group_messages(self, event: AstrMessageEvent):
         """Capture all group messages for memory storage"""
         # 检查配置
@@ -81,11 +115,17 @@ class GroupCapture:
                 return
 
             # 存储消息到数据库（群聊用户消息，role 固定为 user）
-            await self.conversation_manager.add_message_from_event(
+            stored = await self.conversation_manager.add_message_from_event(
                 event=event,
                 role="user",
                 content=content,
             )
+            if stored is not None and self._has_image_placeholder(content):
+                # 图片转文字结果由上游链路稍后回填到 message_str，先按占位符入库，
+                # 后台等描述出现后再补写正文，避免阻塞消息顺序
+                asyncio.create_task(
+                    self._backfill_image_description(stored.id, event, content)
+                )
             if dedup_key:
                 await self.message_utils.mark_message_processed(dedup_key)
 

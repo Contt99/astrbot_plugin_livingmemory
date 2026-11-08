@@ -61,7 +61,7 @@ def mutation_access(config: Any, event: Any, *, persona_id=None):
         access = current_adapter_access.get()
         if access.read_policy is not None:
             scope = resolve_memory_scope(config, event) or _event_value(event, "unified_msg_origin")
-            policy = replace(access.read_policy, private_scopes=(scope,), group_prefix="")
+            policy = replace(access.read_policy, private_scopes=(scope,), group_prefix="", group_scopes=())
             current_adapter_access.set(replace(access, read_policy=policy))
         yield
 
@@ -128,6 +128,28 @@ def owner_read_enabled(config):
 def current_read_policy():
     access = current_adapter_access.get()
     return access.read_policy if access else None
+
+
+# 群会话反查：私聊时按 QQ 号找出这个人待过的群聊会话。
+# 插件初始化时注入实现（读 conversations.db），未注入时返回空、退回原行为。
+_group_scope_resolver = None
+
+
+def set_group_scope_resolver(resolver):
+    """Register the lookup used to resolve a sender's group sessions."""
+    global _group_scope_resolver
+    _group_scope_resolver = resolver
+
+
+def resolve_group_scopes(adapter_id, platform, sender_id):
+    """Return the group sessions this sender has spoken in (best effort)."""
+    resolver = _group_scope_resolver
+    if resolver is None or not adapter_id or not sender_id:
+        return ()
+    try:
+        return tuple(resolver(adapter_id, platform, sender_id) or ())
+    except Exception:
+        return ()
 
 
 def bind_read_persona(persona_id):

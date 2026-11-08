@@ -18,7 +18,37 @@ from .managers.memory_engine import MemoryEngine
 from .processors.memory_processor import MemoryProcessor
 from pathlib import Path
 from astrbot.core.provider.provider import Provider
+import sqlite3
 import time
+
+
+def _build_group_scope_resolver(db_path):
+    """按 QQ 号反查其在历史消息里出现过的群聊会话。
+
+    只读、同步、短查询：私聊记忆召回时用来决定这个人能看到哪些群的记忆。
+    打不开库或查询失败时返回空，读取范围退回「本私聊」。
+    """
+
+    def _resolve(adapter_id, platform, sender_id):
+        try:
+            conn = sqlite3.connect(
+                f"file:{db_path}?mode=ro", uri=True, timeout=2.0
+            )
+        except Exception:
+            return ()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT session_id FROM messages "
+                "WHERE sender_id = ? AND session_id LIKE ?",
+                (str(sender_id), f"{adapter_id}:GroupMessage:%"),
+            ).fetchall()
+            return tuple(row[0] for row in rows if row[0])
+        except Exception:
+            return ()
+        finally:
+            conn.close()
+
+    return _resolve
 
 
 class InitializerFinalizeMixin:
@@ -287,6 +317,13 @@ class InitializerFinalizeMixin:
             conversation_db_path = data_dir_path / "conversations.db"
             conversation_store = ConversationStore(str(conversation_db_path))
             await conversation_store.initialize()
+
+            # 让私聊读取范围按 QQ 号反查群聊历史
+            from .memory_scope import set_group_scope_resolver
+
+            set_group_scope_resolver(
+                _build_group_scope_resolver(str(conversation_db_path))
+            )
 
             session_config = self.config_manager.session_manager
             self.conversation_manager = ConversationManager(

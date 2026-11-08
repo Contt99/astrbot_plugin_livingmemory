@@ -9,6 +9,9 @@ class OwnerReadPolicy:
     private_scopes: tuple[str, ...] = ()
     group_prefix: str = ""
     valid_event: bool = False
+    # 私聊时允许读的群会话，按发言者 QQ 号从历史消息里反查得出。
+    # 与 group_prefix（主人全开）并存：prefix 非空时两者都能命中同一批群。
+    group_scopes: tuple[str, ...] = ()
 
     def with_persona(self, persona_id):
         return replace(self, persona_id=str(persona_id or "").strip())
@@ -24,7 +27,8 @@ class OwnerReadPolicy:
                  and ":" not in scope[len(self.group_prefix):])
         return (self.ready and metadata.get("adapter_id") == self.adapter_id
                 and metadata.get("persona_id") == self.persona_id
-                and (scope in self.private_scopes or group))
+                and (scope in self.private_scopes or group
+                     or scope in self.group_scopes))
 
     def sql(self, metadata):
         if not self.ready:
@@ -35,6 +39,9 @@ class OwnerReadPolicy:
         if self.private_scopes:
             alternatives.append(f"{scope} IN ({','.join('?' for _ in self.private_scopes)})")
             params.extend(self.private_scopes)
+        if self.group_scopes:
+            alternatives.append(f"{scope} IN ({','.join('?' for _ in self.group_scopes)})")
+            params.extend(self.group_scopes)
         if self.group_prefix:
             # Equality on the literal prefix avoids wildcard expansion of adapter IDs.
             alternatives.append(f"(substr({scope}, 1, ?) = ? AND length({scope}) > ? AND instr(substr({scope}, ?), ':') = 0)")
@@ -47,7 +54,12 @@ class OwnerReadPolicy:
 
 def derive_read_policy(config, event, persona_id=None):
     # Imports are local to keep the existing memory_scope public API stable.
-    from .memory_scope import _event_value, _config_get, parse_value_list
+    from .memory_scope import (
+        _event_value,
+        _config_get,
+        parse_value_list,
+        resolve_group_scopes,
+    )
     denied = OwnerReadPolicy()
     if event is None or isinstance(event, str):
         return denied
@@ -63,5 +75,11 @@ def derive_read_policy(config, event, persona_id=None):
         return denied
     owners = parse_value_list(_config_get(config, "filtering_settings.owner_private_ids", ""))
     scopes = (origin,) if group else (origin, f"livingmemory:user:{platform}:{sender.casefold()}")
+    if group:
+        return OwnerReadPolicy(adapter, str(persona_id or ""), scopes, "", True)
+    # 私聊：主人保持“全群”并集（沿用 group_prefix），其余人按本人 QQ 号
+    # 反查其在历史消息里出现过的群聊会话，读不到没待过的群。
+    owner_prefix = f"{adapter}:GroupMessage:" if sender in owners else ""
+    group_scopes = () if owner_prefix else resolve_group_scopes(adapter, platform, sender)
     return OwnerReadPolicy(adapter, str(persona_id or ""), scopes,
-                           f"{adapter}:GroupMessage:" if not group and sender in owners else "", True)
+                           owner_prefix, True, tuple(group_scopes))

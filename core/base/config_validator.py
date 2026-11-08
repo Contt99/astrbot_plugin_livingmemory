@@ -244,6 +244,7 @@ class FilteringConfig(BaseModel):
 
     use_persona_filtering: bool = Field(default=True, description="是否使用人格过滤")
     owner_private_read_union: bool = Field(default=False, description="仅主人私聊联合读取同适配器同人格群记忆；群聊和其他私聊严格隔离")
+    allow_external_read: bool = Field(default=True, description="允许未绑定事件的外部插件读取记忆；关闭后仅 LM 自身与原生页面管理可读")
     owner_private_ids: str = Field(default="", description="主人平台原始用户 ID，逗号或换行分隔；不接受模型参数或身份别名")
     use_session_filtering: bool = Field(default=True, description="是否使用会话过滤")
     memory_scope_mode: str = Field(

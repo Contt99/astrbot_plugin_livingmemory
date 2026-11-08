@@ -105,6 +105,7 @@ class InitializerFinalizeMixin:
             )
             memory_engine_config = {
                 "owner_private_read_union": self.config_manager.get("filtering_settings.owner_private_read_union", False),
+                "allow_external_read": self.config_manager.get("filtering_settings.allow_external_read", True),
                 "graph_document_path": str(graph_doc_path)
                 if graph_memory_enabled
                 else None,

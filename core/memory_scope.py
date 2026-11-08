@@ -144,9 +144,14 @@ def read_denied(config):
     policy = current_read_policy()
     if policy is not None:
         return not policy.ready
-    return owner_read_enabled(config) and not (
-        access and (access.write or access.native_management)
-    )
+    if access is None:
+        external_read = _config_get(
+            config,
+            "filtering_settings.allow_external_read",
+            _config_get(config, "allow_external_read", True),
+        )
+        return not bool(external_read)
+    return not (access.write or access.native_management)
 
 
 def read_filters(session_id, persona_id):

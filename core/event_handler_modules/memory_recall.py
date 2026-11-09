@@ -209,6 +209,43 @@ class MemoryRecall:
                 recall_session_id = resolve_memory_scope(self.config_manager, event)
                 recall_persona_id = persona_id if use_persona_filtering else None
 
+                # group_chat_plus 已在上下文里注入「=== 背景信息 ===」时，
+                # 同一批记忆会以两种格式重复出现，这里跳过检索与注入；
+                # 时间覆盖注入仍保留，避免「问上次什么时候聊过」失灵。
+                # 注意：chat_plus 在 priority=0 阶段只把「当前用户短消息」放进
+                # req.prompt，完整上下文（含「=== 背景信息 ===」）要等它自己的
+                # priority=-1 钩子才写回，所以本钩子里必须补读它存在 event extra
+                # 里的全文（_group_chat_plus_prompt），否则永远识别不到。
+                _cp_mem_blob = prompt_text if isinstance(prompt_text, str) else ""
+                try:
+                    if event.get_extra("_group_chat_plus_request", False):
+                        _cp_full_prompt = event.get_extra("_group_chat_plus_prompt", "")
+                        if isinstance(_cp_full_prompt, str) and _cp_full_prompt:
+                            _cp_mem_blob = _cp_mem_blob + "\n" + _cp_full_prompt
+                except Exception:
+                    pass
+                for _ctx in reversed(getattr(req, "contexts", None) or []):
+                    if isinstance(_ctx, dict) and _ctx.get("role") == "user":
+                        _c = _ctx.get("content")
+                        if isinstance(_c, str):
+                            _cp_mem_blob = _cp_mem_blob + "\n" + _c
+                        elif isinstance(_c, list):
+                            _cp_mem_blob = _cp_mem_blob + "\n" + "".join(
+                                _b.get("text", "")
+                                for _b in _c
+                                if isinstance(_b, dict)
+                                and isinstance(_b.get("text"), str)
+                            )
+                        break
+                if "=== 背景信息 ===" in _cp_mem_blob:
+                    logger.info(
+                        f"[{session_id}] 本轮上下文已含 chat_plus 背景信息，跳过 RAG 检索与注入"
+                    )
+                    await self._inject_temporal_coverage(
+                        req, actual_query, recall_session_id, recall_persona_id
+                    )
+                    return
+
                 # 使用原始用户输入作为召回关键字
                 query_for_search = actual_query
 
